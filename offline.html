@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Snake+ Arcade (Offline)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game-canvas" width="900" height="700"></canvas>
+      <div id="ui-overlay">
+        <div class="row">
+          <div class="stat"><span class="label">Score</span><span id="score">0</span></div>
+          <div class="stat"><span class="label">Multiplier</span><span id="mult">x1</span></div>
+          <div class="stat"><span class="label">Hunger</span><span id="hunger">100%</span></div>
+          <div class="stat"><span class="label">Length</span><span id="length">1</span></div>
+          <div class="stat"><span class="label">Speed</span><span id="speed">1.0</span></div>
+          <div class="stat"><span class="label">Event</span><span id="event">—</span></div>
+          <div class="stat"><span class="label">Power-up</span><span id="power">None</span></div>
+        </div>
+        <div class="row help">
+          <div>WASD / Arrows to move • Space to use power-up • P to pause • R to restart</div>
+        </div>
+      </div>
+      <div id="menu">
+        <h1>Snake+ Arcade</h1>
+        <p>Open this offline file directly—no server required.</p>
+        <button id="start-btn">Start Game</button>
+      </div>
+      <div id="gameover" class="hidden">
+        <h2>Game Over</h2>
+        <p id="final-stats"></p>
+        <button id="restart-btn">Play Again</button>
+      </div>
+    </div>
+
+    <script>
+// CONFIG
+const CONFIG = {
+  grid: { cols: 45, rows: 35, tile: 20 },
+  timing: {
+    baseStepsPerSecond: 7.0,
+    minStepsPerSecond: 3.5,
+    maxStepsPerSecond: 18.0,
+    hungerDrainPerSecond: 4.0,
+    hungerEatRefill: 28,
+    comboWindowSec: 3.0,
+    eventMinCooldown: 8.0,
+    eventMaxCooldown: 16.0,
+    powerupDurationSec: 6.0,
+  },
+  colors: {
+    grid: '#13172a', gridSubtle: '#0f1326',
+    snakeHead: '#9ae6b4', snakeBody: '#34d399', snakeGhost: '#7dd3fc',
+    apple: '#f87171', goldenApple: '#fbbf24', rottenApple: '#a3a3a3',
+    obstacle: '#475569', portalA: '#a78bfa', portalB: '#7dd3fc',
+    fog: 'rgba(15,18,32,0.96)', meteor: '#fb7185', textShadow: 'rgba(255,255,255,0.06)'
+  },
+  gameplay: {
+    initialLength: 4,
+    initialHunger: 100,
+    obstacleDensity: 0.05,
+    extraObstaclePerScore: 0.0025,
+    aiSnakes: 0,
+    portalTeleportCooldownSteps: 3,
+  }
+};
+
+// UTILS
+function mulberry32(seed){ let t = seed >>> 0; return function(){ t += 0x6D2B79F5; let r = Math.imul(t ^ t >>> 15, 1 | t); r ^= r + Math.imul(r ^ r >>> 7, 61 | r); return ((r ^ r >>> 14) >>> 0) / 4294967296; } }
+class RNG { constructor(seed=Date.now()){ this.seed=seed>>>0; this.rand=mulberry32(this.seed);} next(){return this.rand();} range(min,max){return min+(max-min)*this.next();} int(min,maxInc){return Math.floor(this.range(min,maxInc+1));} chance(p){return this.next()<p;} pick(arr){ return arr.length? arr[this.int(0,arr.length-1)]:undefined;} shuffle(a){ for(let i=a.length-1;i>0;i--){const j=this.int(0,i); [a[i],a[j]]=[a[j],a[i]];} return a;}}
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const nowSec=()=>performance.now()/1000;
+function withGridWrap(x,y,cols,rows){ return { x:(x+cols)%cols, y:(y+rows)%rows }; }
+function posKey(x,y){ return `${x},${y}`; }
+function parsePos(k){ const [x,y]=k.split(',').map(Number); return {x,y}; }
+function roundRectPath(ctx,x,y,w,h,r){ const rad=Math.max(0,Math.min(r,Math.min(w,h)/2)); ctx.beginPath(); ctx.moveTo(x+rad,y); ctx.lineTo(x+w-rad,y); ctx.arcTo(x+w,y,x+w,y+rad,rad); ctx.lineTo(x+w,y+h-rad); ctx.arcTo(x+w,y+h,x+w-rad,y+h,rad); ctx.lineTo(x+rad,y+h); ctx.arcTo(x,y+h,x,y+h-rad,rad); ctx.lineTo(x,y+rad); ctx.arcTo(x,y,x+rad,y,rad); }
+
+// ENTITIES
+const AppleType = { Normal:'normal', Golden:'golden', Rotten:'rotten' };
+class Apple { constructor(x,y,type=AppleType.Normal){ this.x=x; this.y=y; this.type=type; }
+  get score(){ return this.type===AppleType.Golden?10: this.type===AppleType.Rotten?-4:3; }
+  get growth(){ return this.type===AppleType.Golden?3: this.type===AppleType.Rotten?-2:1; }
+  draw(ctx,tile){ ctx.save(); const cx=this.x*tile+tile/2, cy=this.y*tile+tile/2, r=tile*0.35; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.fillStyle=this.type===AppleType.Golden?CONFIG.colors.goldenApple:(this.type===AppleType.Rotten?CONFIG.colors.rottenApple:CONFIG.colors.apple); ctx.shadowColor=CONFIG.colors.textShadow; ctx.shadowBlur=10; ctx.fill(); ctx.fillStyle='#34d399'; ctx.beginPath(); ctx.ellipse(cx+r*0.3, cy-r*0.8, r*0.25, r*0.12, Math.PI/6, 0, Math.PI*2); ctx.fill(); ctx.restore(); } }
+class Obstacle { constructor(x,y){ this.x=x; this.y=y; } draw(ctx,tile){ const px=this.x*tile, py=this.y*tile; ctx.save(); ctx.fillStyle=CONFIG.colors.obstacle; ctx.shadowColor=CONFIG.colors.textShadow; ctx.shadowBlur=8; ctx.fillRect(px+2,py+2,tile-4,tile-4); ctx.restore(); } }
+class Portal { constructor(ax,ay,bx,by){ this.a={x:ax,y:ay}; this.b={x:bx,y:by}; }
+  draw(ctx,tile){ const d=(p,c)=>{ const cx=p.x*tile+tile/2, cy=p.y*tile+tile/2, r=tile*0.42; ctx.save(); ctx.strokeStyle=c; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha=0.17; ctx.fillStyle=c; ctx.beginPath(); ctx.arc(cx,cy,r*0.7,0,Math.PI*2); ctx.fill(); ctx.restore(); }; d(this.a, CONFIG.colors.portalA); d(this.b, CONFIG.colors.portalB); } }
+class Meteor { constructor(x,y,ttl=6){ this.x=x; this.y=y; this.ttl=ttl; } draw(ctx,tile){ const cx=this.x*tile+tile/2, cy=this.y*tile+tile/2; ctx.save(); ctx.fillStyle=CONFIG.colors.meteor; ctx.beginPath(); ctx.arc(cx,cy,tile*0.35,0,Math.PI*2); ctx.fill(); ctx.restore(); } }
+function drawGrid(ctx,cols,rows,tile){ ctx.save(); ctx.strokeStyle=CONFIG.colors.grid; ctx.lineWidth=1; ctx.beginPath(); for(let x=0;x<=cols;x++){ ctx.moveTo(x*tile+0.5,0); ctx.lineTo(x*tile+0.5,rows*tile);} for(let y=0;y<=rows;y++){ ctx.moveTo(0,y*tile+0.5); ctx.lineTo(cols*tile,y*tile+0.5);} ctx.globalAlpha=0.22; ctx.stroke(); ctx.restore(); }
+
+// SNAKE
+class Snake { constructor(cols,rows,initialLength){ this.cols=cols; this.rows=rows; this.body=[]; const sx=Math.floor(cols/2), sy=Math.floor(rows/2); for(let i=0;i<initialLength;i++){ this.body.unshift({x:sx-i,y:sy}); } this.direction={x:1,y:0}; this.pendingDirections=[]; this.growBy=0; this.hunger=CONFIG.gameplay.initialHunger; this.alive=true; this.ghostSteps=0; this.invertControls=false; this.lastMoveDir={x:1,y:0}; this.justTeleportedCooldown=0; }
+  head(){ return this.body[0]; }
+  setDirection(vec){ const last = this.pendingDirections.length? this.pendingDirections[this.pendingDirections.length-1]: this.direction; if (last.x+vec.x===0 && last.y+vec.y===0) return; this.pendingDirections.push(vec); }
+  applyHungerDrain(dt){ this.hunger=Math.max(0,this.hunger-CONFIG.timing.hungerDrainPerSecond*dt); if(this.hunger<=0) this.alive=false; }
+  applyRefill(p){ this.hunger=Math.min(100,this.hunger+p); }
+  grantGhost(steps){ this.ghostSteps=Math.max(this.ghostSteps,steps); }
+  setInvert(active){ this.invertControls=active; }
+  updateOneStep(wrap=true){ if(!this.alive) return; const next=this.pendingDirections.shift(); if(next) this.direction=next; let nh={ x:this.head().x+this.direction.x, y:this.head().y+this.direction.y }; this.lastMoveDir=this.direction; if(wrap){ nh=withGridWrap(nh.x,nh.y,this.cols,this.rows); } this.body.unshift(nh); if(this.growBy>0){ this.growBy-=1; } else { this.body.pop(); } if(this.ghostSteps>0) this.ghostSteps-=1; if(this.justTeleportedCooldown>0) this.justTeleportedCooldown-=1; }
+  grow(n){ if(n>0) this.growBy+=n; else if(n<0){ for(let i=0;i<Math.min(this.body.length-1,-n);i++) this.body.pop(); if(this.body.length<=1) this.alive=false; } }
+  occupies(x,y,skipHead=false){ return this.body.some((p,i)=> (skipHead&&i===0)?false:(p.x===x&&p.y===y)); }
+  collideSelfOrWalls(walls){ const h=this.head(); if(walls && walls.has(`${h.x},${h.y}`)){ if(this.ghostSteps<=0) this.alive=false; return !this.alive; } for(let i=1;i<this.body.length;i++){ const p=this.body[i]; if(p.x===h.x&&p.y===h.y){ if(this.ghostSteps<=0) this.alive=false; return !this.alive; } } return false; }
+  draw(ctx,tile){ ctx.save(); for(let i=this.body.length-1;i>=0;i--){ const p=this.body[i]; const px=p.x*tile, py=p.y*tile; const r=i===0?4:3; ctx.fillStyle=(this.ghostSteps>0)?CONFIG.colors.snakeGhost:(i===0?CONFIG.colors.snakeHead:CONFIG.colors.snakeBody); ctx.shadowColor=CONFIG.colors.textShadow; ctx.shadowBlur=i===0?16:8; if (typeof ctx.roundRect==='function'){ ctx.beginPath(); ctx.roundRect(px+2,py+2,tile-4,tile-4,r); } else { roundRectPath(ctx,px+2,py+2,tile-4,tile-4,r); } ctx.fill(); } ctx.restore(); }
+}
+
+// GAME
+const GameState={ Menu:'menu', Playing:'playing', Paused:'paused', Over:'over' };
+class Game { constructor(canvas,ui,onGameOver){ this.canvas=canvas; this.ctx=canvas.getContext('2d'); this.ui=ui; this.onGameOver=onGameOver; this.cols=CONFIG.grid.cols; this.rows=CONFIG.grid.rows; this.tile=CONFIG.grid.tile; this.canvas.width=this.cols*this.tile; this.canvas.height=this.rows*this.tile; this.rng=new RNG(Date.now()); this.reset(); this.keydown=(e)=>this.onKeyDown(e); window.addEventListener('keydown',this.keydown); }
+  reset(){ this.state=GameState.Menu; this.snake=new Snake(this.cols,this.rows,CONFIG.gameplay.initialLength); this.score=0; this.multiplier=1; this.maxMultiplier=1; this.comboTimer=0; this.stepsPerSecond=CONFIG.timing.baseStepsPerSecond; this.time=0; this.apples=new Map(); this.obstacles=new Map(); this.portal=null; this.meteors=[]; this.fogActive=false; this.invertActive=false; this.eventTimer=this.randomEventCooldown(); this.eventsTriggered=0; this.powerUp=null; this.framePrev=nowSec(); this.accum=0; this.paused=false; this.generateObstacles(); for (let i=0;i<3;i++) this.spawnApple(); this.spawnPortal(); }
+  randomEventCooldown(){ return this.rng.range(CONFIG.timing.eventMinCooldown, CONFIG.timing.eventMaxCooldown); }
+  start(){ this.state=GameState.Playing; this.loop(); }
+  isGameOver(){ return this.state===GameState.Over; }
+  loop(){ if(this.state===GameState.Over) return; const t=nowSec(); const dt=Math.min(0.06,t-this.framePrev); this.framePrev=t; if(!this.paused && this.state===GameState.Playing){ this.update(dt); this.render(); } else if (this.state===GameState.Playing){ this.render(); this.drawPausedOverlay(); } requestAnimationFrame(()=>this.loop()); }
+  update(dt){ this.time+=dt; this.snake.applyHungerDrain(dt); if(this.comboTimer>0) this.comboTimer-=dt; if(this.comboTimer<=0) this.multiplier=1; this.eventTimer-=dt; if(this.eventTimer<=0){ this.triggerRandomEvent(); this.eventTimer=this.randomEventCooldown(); } const stepInterval=1/this.stepsPerSecond; this.accum+=dt; while(this.accum>=stepInterval){ this.stepOne(); this.accum-=stepInterval; } if(!this.snake.alive) this.gameOver('Snake died'); this.updateUI(); }
+  stepOne(){ this.snake.updateOneStep(true); if(this.portal && this.snake.justTeleportedCooldown<=0){ const h=this.snake.head(); const a=this.portal.a, b=this.portal.b; let tele=false; if(h.x===a.x&&h.y===a.y){ this.snake.body[0]={x:b.x,y:b.y}; tele=true; } else if(h.x===b.x&&h.y===b.y){ this.snake.body[0]={x:a.x,y:a.y}; tele=true; } if(tele){ this.snake.justTeleportedCooldown=CONFIG.gameplay.portalTeleportCooldownSteps; } }
+    this.meteors.forEach(m=>m.ttl-=1); this.meteors=this.meteors.filter(m=>m.ttl>0);
+    const head=this.snake.head(); const headKey=posKey(head.x,head.y);
+    if(this.meteors.some(m=>m.x===head.x&&m.y===head.y)){ this.snake.alive=false; return; }
+    const hit=this.snake.collideSelfOrWalls(this.obstacles); if(hit) return;
+    const apple=this.apples.get(headKey); if(apple){ this.consumeApple(apple, headKey); }
+    const targetOb=Math.floor(this.cols*this.rows*(CONFIG.gameplay.obstacleDensity+this.score*CONFIG.gameplay.extraObstaclePerScore)); if(this.obstacles.size<targetOb && this.rng.chance(0.2)) this.spawnObstacle();
+    if(this.rng.chance(0.03)) this.spawnPortal(true);
+  }
+  consumeApple(apple,key){ this.apples.delete(key); this.snake.grow(apple.growth); const comboActive=this.comboTimer>0; if(comboActive) this.multiplier=Math.min(this.multiplier+1,12); else this.multiplier=1; this.maxMultiplier=Math.max(this.maxMultiplier,this.multiplier); this.score+=Math.max(0,Math.floor(apple.score*this.multiplier)); this.comboTimer=CONFIG.timing.comboWindowSec; if(apple.type!==AppleType.Rotten) this.snake.applyRefill(CONFIG.timing.hungerEatRefill); if(apple.type===AppleType.Golden) this.stepsPerSecond=clamp(this.stepsPerSecond+0.6, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); else if(apple.type===AppleType.Rotten) this.stepsPerSecond=clamp(this.stepsPerSecond-0.4, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); if(!this.powerUp && this.rng.chance(0.18+0.02*this.multiplier)) this.powerUp='ghost'; const target=this.rng.int(3,5); while(this.apples.size<target) this.spawnApple(); }
+  updateUI(){ this.ui.score.textContent=String(this.score); this.ui.mult.textContent=`x${this.multiplier}`; this.ui.hunger.textContent=`${Math.round(this.snake.hunger)}%`; this.ui.length.textContent=String(this.snake.body.length); this.ui.speed.textContent=this.stepsPerSecond.toFixed(1); this.ui.power.textContent=this.powerUp?this.powerUp:'None'; }
+  render(){ const ctx=this.ctx; ctx.clearRect(0,0,this.canvas.width,this.canvas.height); drawGrid(ctx,this.cols,this.rows,this.tile); for(const k of this.obstacles.keys()){ const {x,y}=parsePos(k); new Obstacle(x,y).draw(ctx,this.tile);} if(this.portal) this.portal.draw(ctx,this.tile); this.meteors.forEach(m=>m.draw(ctx,this.tile)); for(const a of this.apples.values()) a.draw(ctx,this.tile); this.snake.draw(ctx,this.tile); if(this.fogActive) this.drawFog(); }
+  drawFog(){ const ctx=this.ctx, tile=this.tile; const head=this.snake.head(); const cx=head.x*tile+tile/2, cy=head.y*tile+tile/2; const maxR=Math.max(this.canvas.width,this.canvas.height); const grad=ctx.createRadialGradient(cx,cy,tile*3,cx,cy,maxR); grad.addColorStop(0,'rgba(0,0,0,0)'); grad.addColorStop(1,CONFIG.colors.fog); ctx.save(); ctx.fillStyle=grad; ctx.fillRect(0,0,this.canvas.width,this.canvas.height); ctx.restore(); }
+  drawPausedOverlay(){ const ctx=this.ctx; ctx.save(); ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillRect(0,0,this.canvas.width,this.canvas.height); ctx.fillStyle='#e5e7eb'; ctx.font='bold 28px Rubik, sans-serif'; ctx.textAlign='center'; ctx.fillText('Paused', this.canvas.width/2, this.canvas.height/2); ctx.restore(); }
+  gameOver(reason){ this.state=GameState.Over; this.onGameOver({ score:this.score, maxMultiplier:this.maxMultiplier, length:this.snake.body.length, time:this.time, eventsTriggered:this.eventsTriggered, reason }); }
+  onKeyDown(e){ if(this.state!==GameState.Playing) return; const key=e.key; if(key==='p'||key==='P'){ this.paused=!this.paused; return; } if(key===' '||key==='Spacebar'){ this.usePowerUp(); return; } let dir=null; if(key==='ArrowUp'||key==='w'||key==='W') dir={x:0,y:-1}; else if(key==='ArrowDown'||key==='s'||key==='S') dir={x:0,y:1}; else if(key==='ArrowLeft'||key==='a'||key==='A') dir={x:-1,y:0}; else if(key==='ArrowRight'||key==='d'||key==='D') dir={x:1,y:0}; if(dir){ if(this.invertActive) dir={x:-dir.x,y:-dir.y}; this.snake.setDirection(dir); } }
+  usePowerUp(){ if(!this.powerUp) return; if(this.powerUp==='ghost'){ this.snake.grantGhost(Math.round(CONFIG.timing.powerupDurationSec*this.stepsPerSecond)); } this.powerUp=null; }
+  canPlace(x,y){ const k=posKey(x,y); if(this.obstacles.has(k)) return false; if(this.snake.occupies(x,y)) return false; if(this.portal && ((this.portal.a.x===x&&this.portal.a.y===y)||(this.portal.b.x===x&&this.portal.b.y===y))) return false; return !this.apples.has(k); }
+  randomEmptyCell(){ for(let t=0;t<2000;t++){ const x=this.rng.int(0,this.cols-1), y=this.rng.int(0,this.rows-1); if(this.canPlace(x,y)) return {x,y}; } return { x:this.rng.int(0,this.cols-1), y:this.rng.int(0,this.rows-1) }; }
+  generateObstacles(){ const cells=Math.floor(this.cols*this.rows*CONFIG.gameplay.obstacleDensity); for(let i=0;i<cells;i++) this.spawnObstacle(); }
+  spawnObstacle(){ const {x,y}=this.randomEmptyCell(); this.obstacles.set(posKey(x,y),1); }
+  spawnApple(){ const {x,y}=this.randomEmptyCell(); const r=this.rng.next(); let type=AppleType.Normal; if(r>0.88) type=AppleType.Golden; else if(r<0.12) type=AppleType.Rotten; const a=new Apple(x,y,type); this.apples.set(posKey(x,y),a); }
+  spawnPortal(reshuffle=false){ if(reshuffle||!this.portal){ const a=this.randomEmptyCell(); const b=this.randomEmptyCell(); this.portal=new Portal(a.x,a.y,b.x,b.y); } }
+  triggerRandomEvent(){ const events=[()=>this.eventInvertControls(), ()=>this.eventFog(), ()=>this.eventMeteorShower(), ()=>this.eventTimeShift(), ()=>this.eventPortalShuffle(), ()=>this.eventAppleBloom()]; const pick=this.rng.pick(events); pick(); this.eventsTriggered+=1; }
+  setEventLabel(text,color='#e6e8f0'){ this.ui.event.textContent=text; this.ui.event.style.color=color; const el=this.ui.event; if(this._eventLabelTimeout) clearTimeout(this._eventLabelTimeout); this._eventLabelTimeout=setTimeout(()=>{ el.textContent='—'; el.style.color=''; }, 3000); }
+  eventInvertControls(){ this.invertActive=true; this.snake.setInvert(true); this.setEventLabel('Event: Inverted Controls','#fbbf24'); setTimeout(()=>{ this.invertActive=false; this.snake.setInvert(false); }, 6000); }
+  eventFog(){ this.fogActive=true; this.setEventLabel('Event: Blackout Fog','#93c5fd'); setTimeout(()=>{ this.fogActive=false; }, 8000); }
+  eventMeteorShower(){ const count=this.rng.int(6,12); for(let i=0;i<count;i++){ const {x,y}=this.randomEmptyCell(); this.meteors.push(new Meteor(x,y,this.rng.int(4,8))); } this.setEventLabel('Event: Meteor Shower','#fb7185'); }
+  eventTimeShift(){ const faster=this.rng.chance(0.5); if(faster){ this.stepsPerSecond=clamp(this.stepsPerSecond+3.0, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); this.setEventLabel('Event: Speed Surge','#34d399'); setTimeout(()=>{ this.stepsPerSecond=clamp(this.stepsPerSecond-3.0, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); }, 6000); } else { this.stepsPerSecond=clamp(this.stepsPerSecond-3.0, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); this.setEventLabel('Event: Time Slow','#60a5fa'); setTimeout(()=>{ this.stepsPerSecond=clamp(this.stepsPerSecond+3.0, CONFIG.timing.minStepsPerSecond, CONFIG.timing.maxStepsPerSecond); }, 6000); } }
+  eventPortalShuffle(){ this.spawnPortal(true); this.setEventLabel('Event: Portals Shift','#a78bfa'); }
+  eventAppleBloom(){ const toSpawn=this.rng.int(3,6); for(let i=0;i<toSpawn;i++) this.spawnApple(); this.setEventLabel('Event: Apple Bloom','#fca5a5'); }
+}
+
+// BOOT
+(function(){
+  const canvas=document.getElementById('game-canvas');
+  const ui={
+    score: document.getElementById('score'),
+    mult: document.getElementById('mult'),
+    hunger: document.getElementById('hunger'),
+    length: document.getElementById('length'),
+    speed: document.getElementById('speed'),
+    event: document.getElementById('event'),
+    power: document.getElementById('power')
+  };
+  const menu=document.getElementById('menu');
+  const gameover=document.getElementById('gameover');
+  const startBtn=document.getElementById('start-btn');
+  const restartBtn=document.getElementById('restart-btn');
+  const finalStats=document.getElementById('final-stats');
+  let game=null;
+  function start(){ menu.classList.add('hidden'); gameover.classList.add('hidden'); game=new Game(canvas,ui,(summary)=>{ finalStats.textContent=`Score ${summary.score} • Max Mult ${summary.maxMultiplier} • Length ${summary.length} • Time ${summary.time.toFixed(1)}s • Events ${summary.eventsTriggered}`; gameover.classList.remove('hidden'); }); game.start(); }
+  startBtn.addEventListener('click',start);
+  restartBtn.addEventListener('click',start);
+  window.addEventListener('keydown',(e)=>{ if(menu && !menu.classList.contains('hidden') && (e.key==='Enter'||e.key===' ')){ start(); } });
+  window.addEventListener('keydown',(e)=>{ if(game && game.isGameOver() && (e.key==='r'||e.key==='R')) start(); });
+})();
+    </script>
+  </body>
+</html>
