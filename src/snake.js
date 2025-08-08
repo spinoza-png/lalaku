@@ -1,5 +1,5 @@
 import { CONFIG } from './gameConfig.js';
-import { withGridWrap } from './utils.js';
+import { withGridWrap, roundRectPath } from './utils.js';
 
 export class Snake {
   constructor(cols, rows, initialLength) {
@@ -106,8 +106,12 @@ export class Snake {
       ctx.fillStyle = (this.ghostSteps > 0) ? CONFIG.colors.snakeGhost : (i === 0 ? CONFIG.colors.snakeHead : CONFIG.colors.snakeBody);
       ctx.shadowColor = CONFIG.colors.textShadow;
       ctx.shadowBlur = i === 0 ? 16 : 8;
-      ctx.beginPath();
-      ctx.roundRect(px + 2, py + 2, tile - 4, tile - 4, r);
+      if (typeof ctx.roundRect === 'function') {
+        ctx.beginPath();
+        ctx.roundRect(px + 2, py + 2, tile - 4, tile - 4, r);
+      } else {
+        roundRectPath(ctx, px + 2, py + 2, tile - 4, tile - 4, r);
+      }
       ctx.fill();
     }
     ctx.restore();
