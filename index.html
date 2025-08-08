@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Snake+ Arcade</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game-canvas" width="900" height="700"></canvas>
+      <div id="ui-overlay">
+        <div class="row">
+          <div class="stat"><span class="label">Score</span><span id="score">0</span></div>
+          <div class="stat"><span class="label">Multiplier</span><span id="mult">x1</span></div>
+          <div class="stat"><span class="label">Hunger</span><span id="hunger">100%</span></div>
+          <div class="stat"><span class="label">Length</span><span id="length">1</span></div>
+          <div class="stat"><span class="label">Speed</span><span id="speed">1.0</span></div>
+          <div class="stat"><span class="label">Event</span><span id="event">—</span></div>
+          <div class="stat"><span class="label">Power-up</span><span id="power">None</span></div>
+        </div>
+        <div class="row help">
+          <div>WASD / Arrows to move • Space to use power-up • P to pause • R to restart</div>
+        </div>
+      </div>
+      <div id="menu">
+        <h1>Snake+ Arcade</h1>
+        <p>More complex than your average snake. Survive, adapt, and exploit the chaos.</p>
+        <button id="start-btn">Start Game</button>
+      </div>
+      <div id="gameover" class="hidden">
+        <h2>Game Over</h2>
+        <p id="final-stats"></p>
+        <button id="restart-btn">Play Again</button>
+      </div>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
